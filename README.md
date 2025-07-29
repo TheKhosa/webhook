@@ -107,7 +107,29 @@ npm start
 6. **Access Your Service:**  
    - Your webhook endpoint will be:  
      `https://your-app.onrender.com/webhook`
+     
+## Setting Up the Webhook on KeyGen
 
+Once you have your webhook URL, register it with KeyGen using their API:
+
+```csharp
+var client = new RestClient("https://api.keygen.sh/v1/accounts/<account>");
+var request = new RestRequest("webhook-endpoints", Method.POST);
+
+request.AddHeader("Content-Type", "application/vnd.api+json");
+request.AddHeader("Accept", "application/vnd.api+json");
+request.AddHeader("Authorization", "Bearer <token>");
+
+request.AddJsonBody(new {
+  data = new {
+    type = "webhook-endpoints",
+    attributes = new {
+      url = "[https://your-webhook-url.com/path](https://your-app.onrender.com/webhook)"
+    }
+  }
+});
+
+var response = client.Execute(request);
 ---
 
 ## Environment Variables
