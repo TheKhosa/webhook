@@ -9,6 +9,7 @@ const app = express();
 // Security middleware
 app.use(helmet());
 app.use(cors());
+app.use(express.json());
 
 // MS Teams webhook URL from environment
 const TEAMS_WEBHOOK_URL = process.env.TEAMS_WEBHOOK_URL;
@@ -19,16 +20,192 @@ if (!TEAMS_WEBHOOK_URL) {
   process.exit(1);
 }
 
-app.use(express.json());
+// Event category mappings with icons and colors
+const EVENT_CATEGORIES = {
+  account: {
+    icon: '🏢',
+    baseColor: '007bff',
+    events: [
+      'account.billing.updated', 'account.plan.updated', 'account.subscription.canceled',
+      'account.subscription.paused', 'account.subscription.renewed', 'account.subscription.resumed',
+      'account.updated'
+    ]
+  },
+  artifact: {
+    icon: '📦',
+    baseColor: '6f42c1',
+    events: [
+      'artifact.created', 'artifact.deleted', 'artifact.downloaded', 'artifact.updated',
+      'artifact.upload.processing', 'artifact.upload.succeeded', 'artifact.upload.failed',
+      'artifact.uploaded'
+    ]
+  },
+  component: {
+    icon: '🧩',
+    baseColor: '20c997',
+    events: ['component.created', 'component.deleted', 'component.updated']
+  },
+  entitlement: {
+    icon: '🎟️',
+    baseColor: 'fd7e14',
+    events: ['entitlement.created', 'entitlement.deleted', 'entitlement.updated']
+  },
+  group: {
+    icon: '👥',
+    baseColor: '6c757d',
+    events: [
+      'group.created', 'group.deleted', 'group.owners.attached',
+      'group.owners.detached', 'group.updated'
+    ]
+  },
+  license: {
+    icon: '🔑',
+    baseColor: '28a745',
+    events: [
+      'license.check-in-overdue', 'license.check-in-required-soon', 'license.checked-in',
+      'license.checked-out', 'license.created', 'license.deleted', 'license.entitlements.attached',
+      'license.entitlements.detached', 'license.expired', 'license.expiring-soon',
+      'license.group.updated', 'license.policy.updated', 'license.reinstated',
+      'license.renewed', 'license.revoked', 'license.suspended', 'license.updated',
+      'license.usage.decremented', 'license.usage.incremented', 'license.usage.reset',
+      'license.owner.updated', 'license.users.attached', 'license.users.detached',
+      'license.validation.failed', 'license.validation.succeeded'
+    ]
+  },
+  machine: {
+    icon: '🖥️',
+    baseColor: '17a2b8',
+    events: [
+      'machine.checked-out', 'machine.created', 'machine.deleted', 'machine.group.updated',
+      'machine.owner.updated', 'machine.heartbeat.dead', 'machine.heartbeat.ping',
+      'machine.heartbeat.reset', 'machine.heartbeat.resurrected', 'machine.updated'
+    ]
+  },
+  package: {
+    icon: '📄',
+    baseColor: 'e83e8c',
+    events: ['package.created', 'package.deleted', 'package.updated']
+  },
+  policy: {
+    icon: '📋',
+    baseColor: 'ffc107',
+    events: [
+      'policy.created', 'policy.deleted', 'policy.entitlements.attached',
+      'policy.entitlements.detached', 'policy.pool.popped', 'policy.updated'
+    ]
+  },
+  process: {
+    icon: '⚙️',
+    baseColor: 'dc3545',
+    events: [
+      'process.created', 'process.deleted', 'process.heartbeat.dead',
+      'process.heartbeat.ping', 'process.heartbeat.resurrected', 'process.updated'
+    ]
+  },
+  product: {
+    icon: '🛍️',
+    baseColor: '795548',
+    events: ['product.created', 'product.deleted', 'product.updated']
+  },
+  release: {
+    icon: '🚀',
+    baseColor: '9c27b0',
+    events: [
+      'release.constraints.attached', 'release.constraints.detached', 'release.created',
+      'release.deleted', 'release.package.updated', 'release.published',
+      'release.updated', 'release.upgraded', 'release.yanked'
+    ]
+  },
+  'second-factor': {
+    icon: '🔐',
+    baseColor: '607d8b',
+    events: [
+      'second-factor.created', 'second-factor.deleted', 'second-factor.disabled',
+      'second-factor.enabled'
+    ]
+  },
+  token: {
+    icon: '🔒',
+    baseColor: '795548',
+    events: ['token.generated', 'token.regenerated', 'token.revoked']
+  },
+  user: {
+    icon: '👤',
+    baseColor: '3f51b5',
+    events: [
+      'user.banned', 'user.created', 'user.deleted', 'user.group.updated',
+      'user.password-reset', 'user.unbanned', 'user.updated'
+    ]
+  }
+};
+
+// Event-specific color overrides for status indication
+const EVENT_COLOR_OVERRIDES = {
+  // Red for destructive/negative events
+  'dc3545': [
+    'deleted', 'failed', 'expired', 'revoked', 'suspended', 'banned', 
+    'dead', 'overdue', 'canceled', 'yanked'
+  ],
+  // Yellow/Orange for warnings
+  'ffc107': [
+    'expiring-soon', 'check-in-required-soon', 'paused', 'processing', 
+    'disabled', 'detached'
+  ],
+  // Green for positive events
+  '28a745': [
+    'created', 'succeeded', 'renewed', 'resumed', 'reinstated', 
+    'resurrected', 'enabled', 'published', 'attached', 'unbanned'
+  ]
+};
+
+// Function to get event category and metadata
+function getEventMetadata(eventName) {
+  for (const [category, config] of Object.entries(EVENT_CATEGORIES)) {
+    if (config.events.includes(eventName)) {
+      // Check for color overrides based on event action
+      let color = config.baseColor;
+      for (const [overrideColor, keywords] of Object.entries(EVENT_COLOR_OVERRIDES)) {
+        if (keywords.some(keyword => eventName.includes(keyword))) {
+          color = overrideColor;
+          break;
+        }
+      }
+      
+      return {
+        category,
+        icon: config.icon,
+        color,
+        displayName: formatEventName(eventName)
+      };
+    }
+  }
+  
+  // Fallback for unknown events
+  return {
+    category: 'unknown',
+    icon: '📡',
+    color: '6c757d',
+    displayName: formatEventName(eventName)
+  };
+}
+
+// Function to format event names for display
+function formatEventName(eventName) {
+  return eventName
+    .replace(/\./g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
 
 // Function to parse the nested payload
 function parseWebhookPayload(webhookData) {
   try {
-    // The actual license data is in the payload string, need to parse it
     const payload = JSON.parse(webhookData.data.attributes.payload);
     return {
       event: webhookData.data.attributes.event,
-      licenseData: payload.data,
+      data: payload.data,
       webhookMeta: webhookData.data.attributes
     };
   } catch (error) {
@@ -50,115 +227,255 @@ function formatTimestamp(timestamp) {
   }) + ' UTC';
 }
 
-// Function to get status color based on event type
-function getStatusColor(event, status) {
-  if (event.includes('decremented') || event.includes('revoked')) {
-    return 'attention'; // Orange/yellow for usage changes
-  }
-  if (status === 'ACTIVE') {
-    return 'good'; // Green for active
-  }
-  if (status === 'SUSPENDED') {
-    return 'warning'; // Red for suspended
-  }
-  return 'default'; // Blue for other events
+// Generic fact extractors for different object types
+const FACT_EXTRACTORS = {
+  // Common fields across most objects
+  common: (obj) => [
+    { name: 'Status', value: obj.status || 'N/A' },
+    { name: 'Created', value: formatTimestamp(obj.created) },
+    { name: 'Updated', value: formatTimestamp(obj.updated) }
+  ],
+  
+  // License-specific facts
+  license: (obj) => [
+    { name: 'License Key', value: obj.key || 'N/A' },
+    { name: 'Status', value: obj.status || 'N/A' },
+    { name: 'Uses', value: obj.uses?.toString() || '0' },
+    { name: 'Max Machines', value: obj.maxMachines?.toString() || 'Unlimited' },
+    { name: 'Max Users', value: obj.maxUsers?.toString() || 'Unlimited' },
+    { name: 'Suspended', value: obj.suspended ? 'Yes' : 'No' },
+    { name: 'Last Validated', value: formatTimestamp(obj.lastValidated) },
+    { name: 'Expiry', value: formatTimestamp(obj.expiry) },
+    { name: 'Created', value: formatTimestamp(obj.created) }
+  ],
+  
+  // User-specific facts
+  user: (obj) => [
+    { name: 'Email', value: obj.email || 'N/A' },
+    { name: 'First Name', value: obj.firstName || 'N/A' },
+    { name: 'Last Name', value: obj.lastName || 'N/A' },
+    { name: 'Status', value: obj.status || 'N/A' },
+    { name: 'Created', value: formatTimestamp(obj.created) },
+    { name: 'Updated', value: formatTimestamp(obj.updated) }
+  ],
+  
+  // Machine-specific facts
+  machine: (obj) => [
+    { name: 'Name', value: obj.name || 'N/A' },
+    { name: 'Platform', value: obj.platform || 'N/A' },
+    { name: 'Hostname', value: obj.hostname || 'N/A' },
+    { name: 'Cores', value: obj.cores?.toString() || 'N/A' },
+    { name: 'IP', value: obj.ip || 'N/A' },
+    { name: 'Heartbeat Status', value: obj.heartbeatStatus || 'N/A' },
+    { name: 'Last Ping', value: formatTimestamp(obj.lastPing) },
+    { name: 'Created', value: formatTimestamp(obj.created) }
+  ],
+  
+  // Account-specific facts
+  account: (obj) => [
+    { name: 'Name', value: obj.name || 'N/A' },
+    { name: 'Slug', value: obj.slug || 'N/A' },
+    { name: 'Plan', value: obj.plan || 'N/A' },
+    { name: 'Billing Status', value: obj.billingStatus || 'N/A' },
+    { name: 'Created', value: formatTimestamp(obj.created) },
+    { name: 'Updated', value: formatTimestamp(obj.updated) }
+  ],
+  
+  // Product-specific facts
+  product: (obj) => [
+    { name: 'Name', value: obj.name || 'N/A' },
+    { name: 'URL', value: obj.url || 'N/A' },
+    { name: 'Distribution Strategy', value: obj.distributionStrategy || 'N/A' },
+    { name: 'Platforms', value: obj.platforms?.join(', ') || 'N/A' },
+    { name: 'Created', value: formatTimestamp(obj.created) },
+    { name: 'Updated', value: formatTimestamp(obj.updated) }
+  ],
+  
+  // Release-specific facts
+  release: (obj) => [
+    { name: 'Version', value: obj.version || 'N/A' },
+    { name: 'Channel', value: obj.channel || 'N/A' },
+    { name: 'Status', value: obj.status || 'N/A' },
+    { name: 'Tag', value: obj.tag || 'N/A' },
+    { name: 'Created', value: formatTimestamp(obj.created) },
+    { name: 'Updated', value: formatTimestamp(obj.updated) }
+  ],
+  
+  // Generic extractor for other types
+  generic: (obj) => [
+    { name: 'ID', value: obj.id || 'N/A' },
+    { name: 'Name', value: obj.name || obj.title || 'N/A' },
+    { name: 'Type', value: obj.type || 'N/A' },
+    { name: 'Status', value: obj.status || 'N/A' },
+    { name: 'Created', value: formatTimestamp(obj.created) },
+    { name: 'Updated', value: formatTimestamp(obj.updated) }
+  ]
+};
+
+// Function to extract relevant facts based on object type
+function extractFacts(data, eventCategory) {
+  const obj = data.attributes || data;
+  const extractor = FACT_EXTRACTORS[eventCategory] || FACT_EXTRACTORS.generic;
+  
+  return extractor(obj).filter(fact => 
+    fact.value !== 'N/A' && fact.value !== null && fact.value !== undefined && fact.value !== ''
+  );
 }
 
-// Function to create MS Teams message card
-function createTeamsMessageCard(parsedData) {
-  const { event, licenseData, webhookMeta } = parsedData;
-  const license = licenseData.attributes;
+// Function to generate dashboard URL
+function generateDashboardUrl(data, eventCategory) {
+  const accountId = data.relationships?.account?.data?.id;
+  const objectId = data.id;
   
-  // Create a more readable event name
-  const eventDisplayName = event
-    .replace(/\./g, ' ')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .split(' ')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
+  if (!accountId || !objectId) return null;
+  
+  const baseUrl = 'https://app.keygen.sh';
+  const categoryMap = {
+    license: 'licenses',
+    user: 'users',
+    machine: 'machines',
+    product: 'products',
+    release: 'releases',
+    policy: 'policies',
+    token: 'tokens',
+    group: 'groups',
+    entitlement: 'entitlements',
+    component: 'components',
+    artifact: 'artifacts',
+    package: 'packages',
+    process: 'processes',
+    account: ''
+  };
+  
+  const path = categoryMap[eventCategory];
+  if (eventCategory === 'account') {
+    return `${baseUrl}/accounts/${accountId}`;
+  }
+  
+  return path ? `${baseUrl}/accounts/${accountId}/${path}/${objectId}` : null;
+}
 
+// Function to create warning sections for critical events
+function createWarningSection(eventName, data) {
+  const warnings = [];
+  
+  // License warnings
+  if (eventName.includes('license')) {
+    const attrs = data.attributes;
+    if (eventName.includes('expired')) {
+      warnings.push({
+        title: '⚠️ License Expired',
+        subtitle: 'This license has expired and is no longer valid.',
+        color: 'dc3545'
+      });
+    } else if (eventName.includes('expiring-soon')) {
+      warnings.push({
+        title: '⏰ License Expiring Soon',
+        subtitle: 'This license will expire within the next 3 days.',
+        color: 'ffc107'
+      });
+    } else if (eventName.includes('suspended') || attrs?.suspended) {
+      warnings.push({
+        title: '🚫 License Suspended',
+        subtitle: 'This license is suspended and may not function properly.',
+        color: 'dc3545'
+      });
+    } else if (eventName.includes('check-in-overdue')) {
+      warnings.push({
+        title: '📅 Check-in Overdue',
+        subtitle: 'This license is overdue for its required check-in.',
+        color: 'dc3545'
+      });
+    }
+  }
+  
+  // Machine warnings
+  if (eventName.includes('machine.heartbeat.dead')) {
+    warnings.push({
+      title: '💔 Machine Heartbeat Dead',
+      subtitle: 'Machine is no longer responding to heartbeat pings.',
+      color: 'dc3545'
+    });
+  }
+  
+  // Account warnings
+  if (eventName.includes('subscription.canceled')) {
+    warnings.push({
+      title: '❌ Subscription Canceled',
+      subtitle: 'Account subscription has been canceled.',
+      color: 'dc3545'
+    });
+  }
+  
+  return warnings;
+}
+
+// Main function to create Teams message card
+function createTeamsMessageCard(parsedData) {
+  const { event, data, webhookMeta } = parsedData;
+  const eventMeta = getEventMetadata(event);
+  const facts = extractFacts(data, eventMeta.category);
+  const dashboardUrl = generateDashboardUrl(data, eventMeta.category);
+  const warnings = createWarningSection(event, data);
+  
+  // Create main section
+  const mainSection = {
+    activityTitle: `${eventMeta.icon} ${eventMeta.displayName}`,
+    activitySubtitle: `${eventMeta.category.charAt(0).toUpperCase() + eventMeta.category.slice(1)} Event`,
+    activityImage: `https://img.icons8.com/fluency/48/${eventMeta.category === 'license' ? 'license' : 
+                                                       eventMeta.category === 'user' ? 'user' :
+                                                       eventMeta.category === 'machine' ? 'computer' :
+                                                       eventMeta.category === 'account' ? 'organization' : 'webhook'}.png`,
+    facts: [
+      ...facts,
+      { name: 'Event Time', value: formatTimestamp(webhookMeta.created) }
+    ],
+    markdown: true
+  };
+  
+  // Create base message card
   const messageCard = {
     "@type": "MessageCard",
     "@context": "https://schema.org/extensions",
-    "summary": `License ${eventDisplayName}`,
-    "themeColor": getStatusColor(event, license.status) === 'good' ? '28a745' : 
-                  getStatusColor(event, license.status) === 'attention' ? 'ffc107' : 
-                  getStatusColor(event, license.status) === 'warning' ? 'dc3545' : '007bff',
-    "sections": [
-      {
-        "activityTitle": `🔑 License ${eventDisplayName}`,
-        "activitySubtitle": `License Key: ${license.key}`,
-        "activityImage": "https://img.icons8.com/fluency/48/license.png",
-        "facts": [
-          {
-            "name": "Status",
-            "value": license.status
-          },
-          {
-            "name": "Uses",
-            "value": license.uses?.toString() || '0'
-          },
-          {
-            "name": "Max Machines",
-            "value": license.maxMachines?.toString() || 'Unlimited'
-          },
-          {
-            "name": "Last Validated",
-            "value": formatTimestamp(license.lastValidated)
-          },
-          {
-            "name": "Created",
-            "value": formatTimestamp(license.created)
-          },
-          {
-            "name": "Event Time",
-            "value": formatTimestamp(webhookMeta.created)
-          }
-        ],
-        "markdown": true
-      }
-    ],
-    "potentialAction": [
-      {
-        "@type": "OpenUri",
-        "name": "View License Details",
-        "targets": [
-          {
-            "os": "default",
-            "uri": `https://app.keygen.sh/accounts/${licenseData.relationships.account.data.id}/licenses/${licenseData.id}`
-          }
-        ]
-      }
-    ]
+    "summary": `${eventMeta.displayName}`,
+    "themeColor": eventMeta.color,
+    "sections": [mainSection]
   };
-
-  // Add additional context for specific events
-  if (event.includes('usage')) {
-    messageCard.sections[0].facts.unshift({
-      "name": "Usage Event",
-      "value": event.includes('incremented') ? '⬆️ Usage Increased' : '⬇️ Usage Decreased'
-    });
-  }
-
-  // Add warning section for suspended licenses
-  if (license.status === 'SUSPENDED' || license.suspended) {
+  
+  // Add warning sections
+  warnings.forEach(warning => {
     messageCard.sections.push({
-      "activityTitle": "⚠️ License Suspended",
-      "activitySubtitle": "This license is currently suspended and may not function properly.",
-      "markdown": true
+      activityTitle: warning.title,
+      activitySubtitle: warning.subtitle,
+      markdown: true
+    });
+  });
+  
+  // Add action buttons
+  const actions = [];
+  
+  if (dashboardUrl) {
+    actions.push({
+      "@type": "OpenUri",
+      "name": `View ${eventMeta.category.charAt(0).toUpperCase() + eventMeta.category.slice(1)}`,
+      "targets": [{ "os": "default", "uri": dashboardUrl }]
     });
   }
-
-  // Add machine info if available
-  const machineCount = licenseData.relationships.machines?.meta?.count;
-  const coreCount = licenseData.relationships.machines?.meta?.cores;
-  if (machineCount !== undefined || coreCount !== undefined) {
-    messageCard.sections[0].facts.push({
-      "name": "Machines",
-      "value": `${machineCount || 0} machines, ${coreCount || 0} cores`
+  
+  // Add account dashboard link
+  const accountId = data.relationships?.account?.data?.id;
+  if (accountId && eventMeta.category !== 'account') {
+    actions.push({
+      "@type": "OpenUri",
+      "name": "View Account Dashboard",
+      "targets": [{ "os": "default", "uri": `https://app.keygen.sh/accounts/${accountId}` }]
     });
   }
-
+  
+  if (actions.length > 0) {
+    messageCard.potentialAction = actions;
+  }
+  
   return messageCard;
 }
 
@@ -184,8 +501,9 @@ app.post('/webhook', async (req, res) => {
 
     // Create Teams message card
     const teamsMessage = createTeamsMessageCard(parsedData);
+    const eventMeta = getEventMetadata(parsedData.event);
     
-    console.log(`[${new Date().toISOString()}] Forwarding ${parsedData.event} event for license ${parsedData.licenseData.attributes.key}`);
+    console.log(`[${new Date().toISOString()}] Forwarding ${parsedData.event} (${eventMeta.category}) event`);
 
     // Forward to MS Teams
     const response = await axios.post(TEAMS_WEBHOOK_URL, teamsMessage, {
@@ -203,7 +521,8 @@ app.post('/webhook', async (req, res) => {
       forwarded: true,
       teamsStatus: response.status,
       event: parsedData.event,
-      licenseKey: parsedData.licenseData.attributes.key,
+      category: eventMeta.category,
+      objectId: parsedData.data.id,
       timestamp: new Date().toISOString()
     });
 
@@ -231,19 +550,39 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    teamsConfigured: !!TEAMS_WEBHOOK_URL
+    teamsConfigured: !!TEAMS_WEBHOOK_URL,
+    supportedEvents: Object.values(EVENT_CATEGORIES).reduce((acc, cat) => acc + cat.events.length, 0)
+  });
+});
+
+// Events endpoint - lists all supported events
+app.get('/events', (req, res) => {
+  const eventsList = {};
+  Object.entries(EVENT_CATEGORIES).forEach(([category, config]) => {
+    eventsList[category] = {
+      icon: config.icon,
+      color: config.baseColor,
+      events: config.events
+    };
+  });
+  
+  res.json({
+    categories: eventsList,
+    totalEvents: Object.values(EVENT_CATEGORIES).reduce((acc, cat) => acc + cat.events.length, 0)
   });
 });
 
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    service: 'Webhook Forwarder',
+    service: 'Universal Webhook Forwarder',
     status: 'running',
     timestamp: new Date().toISOString(),
+    supportedEvents: Object.values(EVENT_CATEGORIES).reduce((acc, cat) => acc + cat.events.length, 0),
     endpoints: {
       webhook: '/webhook (POST)',
-      health: '/health (GET)'
+      health: '/health (GET)',
+      events: '/events (GET)'
     }
   });
 });
@@ -270,10 +609,12 @@ app.use((error, req, res, next) => {
 // Start server
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
-  console.log(`🚀 Webhook forwarder listening on port ${PORT}`);
+  const totalEvents = Object.values(EVENT_CATEGORIES).reduce((acc, cat) => acc + cat.events.length, 0);
+  console.log(`🚀 Universal Webhook Forwarder listening on port ${PORT}`);
   console.log(`📅 Started at: ${new Date().toISOString()}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`✅ Teams webhook configured: ${!!TEAMS_WEBHOOK_URL}`);
+  console.log(`📡 Supporting ${totalEvents} event types across ${Object.keys(EVENT_CATEGORIES).length} categories`);
   if (TEAMS_WEBHOOK_URL) {
     console.log(`🔗 Teams URL: ${TEAMS_WEBHOOK_URL.substring(0, 50)}...`);
   }
