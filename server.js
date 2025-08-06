@@ -199,13 +199,22 @@ function formatEventName(eventName) {
     .join(' ');
 }
 
-// Function to parse the nested payload
+// Enhanced function to parse the nested payload and extract account info
 function parseWebhookPayload(webhookData) {
   try {
     const payload = JSON.parse(webhookData.data.attributes.payload);
+    
+    // Extract account information from included data if available
+    let accountData = null;
+    if (payload.included) {
+      accountData = payload.included.find(item => item.type === 'account');
+    }
+    
     return {
       event: webhookData.data.attributes.event,
       data: payload.data,
+      included: payload.included || [],
+      account: accountData,
       webhookMeta: webhookData.data.attributes
     };
   } catch (error) {
@@ -236,15 +245,17 @@ const FACT_EXTRACTORS = {
     { name: 'Updated', value: formatTimestamp(obj.updated) }
   ],
   
-  // License-specific facts
+  // Enhanced license-specific facts with validation focus
   license: (obj) => [
-    { name: 'License Key', value: obj.key || 'N/A' },
+    { name: 'License Key', value: obj.key ? obj.key.substring(0, 16) + '...' : 'N/A' }, // Truncated for security
     { name: 'Status', value: obj.status || 'N/A' },
+    { name: 'Validation Status', value: obj.lastValidated ? 'Valid' : 'Pending' },
     { name: 'Uses', value: obj.uses?.toString() || '0' },
     { name: 'Max Machines', value: obj.maxMachines?.toString() || 'Unlimited' },
     { name: 'Max Users', value: obj.maxUsers?.toString() || 'Unlimited' },
     { name: 'Suspended', value: obj.suspended ? 'Yes' : 'No' },
     { name: 'Last Validated', value: formatTimestamp(obj.lastValidated) },
+    { name: 'Next Check-in', value: formatTimestamp(obj.nextCheckIn) },
     { name: 'Expiry', value: formatTimestamp(obj.expiry) },
     { name: 'Created', value: formatTimestamp(obj.created) }
   ],
@@ -312,14 +323,25 @@ const FACT_EXTRACTORS = {
   ]
 };
 
-// Function to extract relevant facts based on object type
-function extractFacts(data, eventCategory) {
+// Enhanced function to extract relevant facts with account information
+function extractFacts(data, eventCategory, accountData = null) {
   const obj = data.attributes || data;
   const extractor = FACT_EXTRACTORS[eventCategory] || FACT_EXTRACTORS.generic;
   
-  return extractor(obj).filter(fact => 
+  let facts = extractor(obj).filter(fact => 
     fact.value !== 'N/A' && fact.value !== null && fact.value !== undefined && fact.value !== ''
   );
+  
+  // Add account information if available
+  if (accountData && accountData.attributes) {
+    const accountName = accountData.attributes.name || accountData.attributes.slug;
+    if (accountName) {
+      // Insert account name near the beginning of facts
+      facts.unshift({ name: 'Account', value: accountName });
+    }
+  }
+  
+  return facts;
 }
 
 // Function to generate dashboard URL
@@ -386,6 +408,12 @@ function createWarningSection(eventName, data) {
         subtitle: 'This license is overdue for its required check-in.',
         color: 'dc3545'
       });
+    } else if (eventName.includes('validation.failed')) {
+      warnings.push({
+        title: '❌ License Validation Failed',
+        subtitle: 'License validation was unsuccessful.',
+        color: 'dc3545'
+      });
     }
   }
   
@@ -410,18 +438,24 @@ function createWarningSection(eventName, data) {
   return warnings;
 }
 
-// Main function to create Teams message card
+// Enhanced function to create Teams message card with account information
 function createTeamsMessageCard(parsedData) {
-  const { event, data, webhookMeta } = parsedData;
+  const { event, data, account, webhookMeta } = parsedData;
   const eventMeta = getEventMetadata(event);
-  const facts = extractFacts(data, eventMeta.category);
+  const facts = extractFacts(data, eventMeta.category, account);
   const dashboardUrl = generateDashboardUrl(data, eventMeta.category);
   const warnings = createWarningSection(event, data);
+  
+  // Enhanced activity subtitle with account name
+  let activitySubtitle = `${eventMeta.category.charAt(0).toUpperCase() + eventMeta.category.slice(1)} Event`;
+  if (account && account.attributes && account.attributes.name) {
+    activitySubtitle += ` • ${account.attributes.name}`;
+  }
   
   // Create main section
   const mainSection = {
     activityTitle: `${eventMeta.icon} ${eventMeta.displayName}`,
-    activitySubtitle: `${eventMeta.category.charAt(0).toUpperCase() + eventMeta.category.slice(1)} Event`,
+    activitySubtitle: activitySubtitle,
     activityImage: `https://img.icons8.com/fluency/48/${eventMeta.category === 'license' ? 'license' : 
                                                        eventMeta.category === 'user' ? 'user' :
                                                        eventMeta.category === 'machine' ? 'computer' :
@@ -433,11 +467,22 @@ function createTeamsMessageCard(parsedData) {
     markdown: true
   };
   
-  // Create base message card
+  // Add special handling for license validation events
+  if (event.includes('license.validation')) {
+    const validationResult = event.includes('succeeded') ? '✅ Succeeded' : '❌ Failed';
+    mainSection.facts.unshift({ name: 'Validation Result', value: validationResult });
+  }
+  
+  // Create base message card with enhanced summary
+  let summary = `${eventMeta.displayName}`;
+  if (account && account.attributes && account.attributes.name) {
+    summary += ` - ${account.attributes.name}`;
+  }
+  
   const messageCard = {
     "@type": "MessageCard",
     "@context": "https://schema.org/extensions",
-    "summary": `${eventMeta.displayName}`,
+    "summary": summary,
     "themeColor": eventMeta.color,
     "sections": [mainSection]
   };
@@ -451,7 +496,7 @@ function createTeamsMessageCard(parsedData) {
     });
   });
   
-  // Add action buttons
+  // Enhanced action buttons
   const actions = [];
   
   if (dashboardUrl) {
@@ -462,12 +507,15 @@ function createTeamsMessageCard(parsedData) {
     });
   }
   
-  // Add account dashboard link
+  // Enhanced account dashboard link with account name if available
   const accountId = data.relationships?.account?.data?.id;
   if (accountId && eventMeta.category !== 'account') {
+    const accountName = account && account.attributes && account.attributes.name 
+      ? account.attributes.name 
+      : 'Account';
     actions.push({
       "@type": "OpenUri",
-      "name": "View Account Dashboard",
+      "name": `View ${accountName} Dashboard`,
       "targets": [{ "os": "default", "uri": `https://app.keygen.sh/accounts/${accountId}` }]
     });
   }
@@ -479,7 +527,7 @@ function createTeamsMessageCard(parsedData) {
   return messageCard;
 }
 
-// Main webhook endpoint
+// Main webhook endpoint with enhanced account logging
 app.post('/webhook', async (req, res) => {
   try {
     console.log(`[${new Date().toISOString()}] Webhook received from IP: ${req.ip}`);
@@ -489,7 +537,7 @@ app.post('/webhook', async (req, res) => {
       console.log('Webhook payload:', JSON.stringify(req.body, null, 2));
     }
     
-    // Parse the webhook data
+    // Parse the webhook data with account extraction
     const parsedData = parseWebhookPayload(req.body);
     if (!parsedData) {
       console.error('Failed to parse webhook data');
@@ -499,11 +547,12 @@ app.post('/webhook', async (req, res) => {
       });
     }
 
-    // Create Teams message card
+    // Create Teams message card with account info
     const teamsMessage = createTeamsMessageCard(parsedData);
     const eventMeta = getEventMetadata(parsedData.event);
+    const accountName = parsedData.account?.attributes?.name || 'Unknown Account';
     
-    console.log(`[${new Date().toISOString()}] Forwarding ${parsedData.event} (${eventMeta.category}) event`);
+    console.log(`[${new Date().toISOString()}] Forwarding ${parsedData.event} (${eventMeta.category}) event for account: ${accountName}`);
 
     // Forward to MS Teams
     const response = await axios.post(TEAMS_WEBHOOK_URL, teamsMessage, {
@@ -522,6 +571,7 @@ app.post('/webhook', async (req, res) => {
       teamsStatus: response.status,
       event: parsedData.event,
       category: eventMeta.category,
+      account: accountName,
       objectId: parsedData.data.id,
       timestamp: new Date().toISOString()
     });
@@ -576,9 +626,17 @@ app.get('/events', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'Universal Webhook Forwarder',
+    version: '1.1.0',
     status: 'running',
     timestamp: new Date().toISOString(),
     supportedEvents: Object.values(EVENT_CATEGORIES).reduce((acc, cat) => acc + cat.events.length, 0),
+    features: [
+      'Enhanced account information display',
+      'License validation tracking',
+      'Smart event categorization',
+      'MS Teams integration',
+      'Security-focused license key display'
+    ],
     endpoints: {
       webhook: '/webhook (POST)',
       health: '/health (GET)',
@@ -610,11 +668,12 @@ app.use((error, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   const totalEvents = Object.values(EVENT_CATEGORIES).reduce((acc, cat) => acc + cat.events.length, 0);
-  console.log(`🚀 Universal Webhook Forwarder listening on port ${PORT}`);
+  console.log(`🚀 Enhanced Universal Webhook Forwarder v1.1.0 listening on port ${PORT}`);
   console.log(`📅 Started at: ${new Date().toISOString()}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`✅ Teams webhook configured: ${!!TEAMS_WEBHOOK_URL}`);
   console.log(`📡 Supporting ${totalEvents} event types across ${Object.keys(EVENT_CATEGORIES).length} categories`);
+  console.log(`🆕 New features: Account info display, Enhanced license validation tracking`);
   if (TEAMS_WEBHOOK_URL) {
     console.log(`🔗 Teams URL: ${TEAMS_WEBHOOK_URL.substring(0, 50)}...`);
   }
